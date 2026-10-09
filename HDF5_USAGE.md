@@ -28,6 +28,8 @@ simulations/<output_simulation>/snapshots/<snapshot>/
     coordinates/ltau500            (4,)           [0, -1, -5.1, -5.7]
     magnetic_field_bz             (4, nx, ny)     kG, signed original Bifrost bz
     magnetic_field_valid          (4, nx, ny)     boolean
+    temperature                   (4, nx, ny)     K
+    temperature_valid             (4, nx, ny)     boolean
     halpha_intensity              (nx, ny, nlambda) original Multi3D ie
 ```
 
@@ -38,6 +40,14 @@ Multi3D in cm. The sign convention is also recorded on the dataset. Use abs(Bz)
 for the original unsigned-field plots. Missing/ambiguous depth surfaces contain
 NaN and a false validity flag. Quiet-region continuum normalization is **not**
 applied to the exported intensity.
+
+Temperature is the gas temperature from the Multi3D input atmosphere (`out_atm`,
+read as `Multi3dOut.atmos.tg`), in kelvin. This already shares the tau500 grid,
+so no Bifrost regridding or staggering is needed for temperature. It is
+interpolated at the same surface heights used for the magnetic maps. Invalid,
+nonpositive temperatures and missing/ambiguous surfaces yield NaN and a false
+`temperature_valid` flag. This uses the atmosphere actually used for the spectral
+synthesis, including any preprocessing applied when exporting from Bifrost.
 
 Wavelengths and spectra are reordered together. No conversion between intensity
 per frequency and intensity per wavelength is applied. To label the native
@@ -70,6 +80,7 @@ with h5py.File('parvathy_simulations.h5', 'r') as f:
     g = f['simulations/en024048_hion/snapshots/385']
     ltau = g['coordinates/ltau500'][:]
     index = np.flatnonzero(np.isclose(ltau, -5.7))[0]
+    temperature = g['temperature'][index]  # (x, y), kelvin
     bz = g['magnetic_field_bz'][index]       # (x, y), signed kG
     wavelength = g['coordinates/wavelength'][:]
     spectrum = g['halpha_intensity'][10, 20, :]  # one pixel

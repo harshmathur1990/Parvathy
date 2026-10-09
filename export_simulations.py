@@ -15,6 +15,30 @@ from plot_simulations import (RUN_ROOT, OUTPUT_ROOT, discover_outputs,
 LTAU = (0.0, -1.0, -5.1, -5.7)
 
 
+def sample_column_temperature(temperature, z, height):
+    """Interpolate Multi3D gas temperature (K) at each column's surface height."""
+    z = np.asarray(z, dtype=float)
+    temperature = np.asarray(temperature)
+    if temperature.shape != height.shape + (z.size,):
+        raise ValueError('Temperature cube does not match the optical-depth grid.')
+    if np.all(np.diff(z) < 0):
+        z = z[::-1]
+        temperature = temperature[..., ::-1]
+    if z.size < 2 or not np.all(np.isfinite(z)) or not np.all(np.diff(z) > 0):
+        raise ValueError('Temperature depth coordinates must be finite and strictly monotonic.')
+    valid = np.isfinite(height) & (height >= z[0]) & (height <= z[-1])
+    result = np.full(height.shape, np.nan)
+    x, y = np.nonzero(valid)
+    lower = np.clip(np.searchsorted(z, height[valid], side='right') - 1, 0, z.size-2)
+    fraction = (height[valid] - z[lower]) / (z[lower+1] - z[lower])
+    left = np.asarray(temperature[x, y, lower], dtype=float)
+    right = np.asarray(temperature[x, y, lower+1], dtype=float)
+    values = np.where(fraction == 0, left, np.where(fraction == 1, right,
+                      (1-fraction)*left + fraction*right))
+    result[valid] = np.where(np.isfinite(values) & (values > 0), values, np.nan)
+    return result
+
+
 def export_snapshot(destination, name, snap, config, args):
     from helita.sim.bifrost import BifrostData
     from helita.sim.multi3d import Multi3dOut
@@ -23,6 +47,10 @@ def export_snapshot(destination, name, snap, config, args):
     multi.readpar()
     multi.readnu()
     tau = multi.readtau500()
+    # Multi3D atmosphere temperature is already on exactly the tau500 grid.
+    # readatmos creates memory maps, rather than loading the atmosphere cubes.
+    multi.readatmos()
+    temperature = multi.atmos.tg
     multi.set_transition(args.upper_level, args.lower_level, ang=args.angle)
     expected = np.arange(multi.d.ired, multi.d.ired + multi.d.nnu)
     positions = np.flatnonzero(np.isin(multi.outff, expected))
@@ -87,12 +115,24 @@ def export_snapshot(destination, name, snap, config, args):
                       sign_convention='Original Bifrost bz sign; positive along original Bifrost +z, not Multi3D +z',
                       missing_values='NaN for absent or ambiguous optical-depth surfaces')
     valid = group.create_dataset('magnetic_field_valid', shape=maps.shape, dtype='bool', compression='gzip')
-    for ds in (maps, valid):
+    temperature_maps = group.create_dataset('temperature', shape=maps.shape, dtype='f4',
+                                            compression='gzip', shuffle=True)
+    temperature_maps.attrs.update(units='K', axes='ltau500,x,y',
+        definition='Multi3D atmosphere gas temperature, interpolated on each log10(tau500) surface',
+        source='out_atm via Multi3dOut.atmos.tg',
+        missing_values='NaN for absent/ambiguous surfaces or invalid/nonpositive temperatures')
+    temperature_valid = group.create_dataset('temperature_valid', shape=maps.shape,
+                                             dtype='bool', compression='gzip')
+    for ds in (maps, valid, temperature_maps, temperature_valid):
         for axis, scale in enumerate([depth]+scales):
             ds.dims[axis].attach_scale(scale)
             ds.dims[axis].label = ('ltau500','x','y')[axis]
     for index, ltau in enumerate(LTAU):
-        field = sample(tau_surface_height(tau, multi.geometry.z, ltau))
+        height = tau_surface_height(tau, multi.geometry.z, ltau)
+        field = sample(height)
+        temperature_map = sample_column_temperature(temperature, multi.geometry.z, height)
+        temperature_maps[index] = temperature_map
+        temperature_valid[index] = np.isfinite(temperature_map)
         maps[index] = field
         valid[index] = np.isfinite(field)
         print(f'{name} snap={snap} ltau={ltau:g}: {np.isfinite(field).sum()}/{field.size} valid pixels')
@@ -125,8 +165,8 @@ def main():
         # Exclusive creation protects an existing exported dataset from overwrite.
         failures = []
         with h5py.File(args.output, 'x') as f:
-            f.attrs.update(schema_version='1.0', created_utc=datetime.now(timezone.utc).isoformat(),
-                           description='H-alpha spectral cubes and optical-depth magnetic field maps',
+            f.attrs.update(schema_version='1.1', created_utc=datetime.now(timezone.utc).isoformat(),
+                           description='H-alpha spectral cubes and optical-depth magnetic field and temperature maps',
                            ltau500_values=LTAU, complete=False)
             for name, snap, config in tasks:
                 try:
